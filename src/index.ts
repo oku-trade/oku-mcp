@@ -3,11 +3,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { OkuPerpsClient } from "./client.js";
+import { loadConfig } from "./config.js";
+import { createSigner, type Signer } from "./signer.js";
 
-const BASE_URL = process.env.OKU_API_URL || "https://accounts.oku.trade";
-const AUTH_TOKEN = process.env.OKU_AUTH_TOKEN || "";
-
-const client = new OkuPerpsClient({ baseUrl: BASE_URL, authToken: AUTH_TOKEN });
+const config = loadConfig();
+const client = new OkuPerpsClient({ baseUrl: config.api_url, authToken: config.auth_token });
+const signer: Signer | undefined = createSigner(config.signer);
 
 const server = new McpServer({
   name: "oku-perps",
@@ -174,6 +175,59 @@ server.tool(
   async ({ address }) => {
     const result = await client.getActiveTwaps(address);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+// =============================================================================
+// Execute Action (one-shot: create + sign + confirm)
+// =============================================================================
+
+server.tool(
+  "execute_action",
+  `Execute a trading action in one call: creates the action, signs it with the configured signer, and submits to Hyperliquid.
+Requires a signer to be configured (private_key, command, or http in config).
+Use this instead of the manual create_action + confirm_action flow.
+Supported action types: order, cancel, cancel_orders, modify, twap, cancel_twap, leverage, margin, scale.`,
+  {
+    address: z.string().describe("Ethereum address to trade from"),
+    params: z.record(z.unknown()).describe("Action parameters (same as create_action params)"),
+  },
+  async ({ address, params }) => {
+    if (!signer) {
+      return {
+        content: [{ type: "text", text: "Error: No signer configured. Set OKU_PRIVATE_KEY, OKU_SIGNER_COMMAND, or OKU_SIGNER_URL, or configure signer in config file." }],
+        isError: true,
+      };
+    }
+
+    // Step 1: Create the action to get the payload
+    const createResult = await client.createAction(address, params);
+    const actionId = createResult.action_id;
+    const actionJson = createResult.action_json;
+
+    if (!actionId || !actionJson) {
+      return {
+        content: [{ type: "text", text: `Error: create_action returned unexpected result: ${JSON.stringify(createResult)}` }],
+        isError: true,
+      };
+    }
+
+    // Step 2: Sign the payload
+    const { signature, nonce } = await signer.sign(actionJson);
+
+    // Step 3: Confirm with the signature
+    const confirmResult = await client.confirmAction(actionId, {
+      action_json: actionJson,
+      nonce,
+      signature,
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ action_id: actionId, ...confirmResult }, null, 2),
+      }],
+    };
   }
 );
 
