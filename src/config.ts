@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
